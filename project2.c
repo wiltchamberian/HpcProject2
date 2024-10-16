@@ -5,6 +5,9 @@
 #include <omp.h>
 #include <mpi.h>
 
+//update after each modification
+#define VERSION 1.03
+
 //global variables
 int g_writeToFile = 0;
 int g_threadsPerProc = 64;
@@ -33,7 +36,11 @@ typedef struct CompressedMatrix {
 }CompressedMatrix;
 
 int randomNumber(unsigned int* seed) {
+#ifdef _WIN32
   return rand_s();
+#else 
+  return rand_r(seed);
+#endif
 }
 
 int** alloc_matrix(int row, int column){
@@ -201,7 +208,7 @@ int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread,
         for (i = iter_start; i < iter_end; ++i) {
             for (int k = 0; k < X.rowLengths[i]; ++k) {
                 int index = X.C[i][k];
-                for (int l = 0; l < Y.rowLengths[i]; ++l) {
+                for (int l = 0; l < Y.rowLengths[index]; ++l) {
                     matrix[i- iter_start][Y.C[index][l]] += X.B[i][k] * Y.B[index][l];
                 }
             }
@@ -308,19 +315,23 @@ void sample(int id, double probability, int rank, int numNode) {
   }
     
   //openmpi matrix multiplication
-  printf("start_omp_matrix_multiplication");
+  printf("start_omp_matrix_multiplication\n");
   int** output = omp_matrix_multiply(X, Y, g_threadsPerProc, rank, numNode);
+  printf("transform_sparse_to_compressed_matrix\n");
   CompressedMatrix result = transform_sparse_to_compressed_matrix(rowEachNode, COLUMN_NUM, output);
+  printf("free output\n");
   free_matrix(output, rowEachNode);
 
 
   //recv result
+  printf("recv result\n");
   CompressedMatrix finalResult;
   if (rank == 0) {
     initCompressedMatrix(&finalResult);
   }
 
   //send result length to master
+  printf("send result length to master\n");
   if (rank != 0) {
     MPI_Send(result.rowLengths, rowEachNode, MPI_INT, 0, 0, MPI_COMM_WORLD);
   }
@@ -334,6 +345,7 @@ void sample(int id, double probability, int rank, int numNode) {
   }
 
   //send result to master
+  printf("send result to master\n");
   if (rank != 0) {
     for (int i = 0; i < rowEachNode; ++i) {
       MPI_Send(result.B[i], result.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD);
@@ -359,6 +371,7 @@ void sample(int id, double probability, int rank, int numNode) {
 
   //write  to file (do we need to support parallel writing? TODO)
   if (g_writeToFile != 0 && rank == 0) {
+    printf("write to file\n");
     mpi_independent_write(X, "XB.txt", "XC.txt");
     mpi_independent_write(Y, "YB.txt", "YC.txt");
     mpi_independent_write(finalResult, "XYB.txt", "XYC.txt");
@@ -387,12 +400,6 @@ void sample(int id, double probability, int rank, int numNode) {
 
 
 int main(int argc, char* argv[]){
-    /*
-    argv[1]:write to file or not, if not exsit, not write to file
-    argv[2]:number of threads in each node to be used, default 64
-    argv[3]:number of rows in each matrix
-    argv[4]:number of nodes(TODO)
-    */
     double probability = 0.01;
     if (argc > 1) {
       g_writeToFile = atoi(argv[1]);
