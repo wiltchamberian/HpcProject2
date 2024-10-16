@@ -45,9 +45,12 @@ int randomNumber(unsigned int* seed) {
 
 int** alloc_matrix(int row, int column){
     omp_set_num_threads(GENERATE_THREAD_NUM);
-    int** matrix = malloc(sizeof(int*)*row);
+    int** matrix = malloc(sizeof(int*) * row);
+    if (matrix == NULL) {
+      return NULL;
+    }
     int i = 0;
-#pragma omp parallel for
+#pragma omp parallel for private(i)
     for(i = 0 ; i < row; ++i){
         matrix[i] = calloc(column, sizeof(int));
     }
