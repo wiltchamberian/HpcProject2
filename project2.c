@@ -32,11 +32,16 @@ typedef struct CompressedMatrix {
   int numRow;
 }CompressedMatrix;
 
+int randomNumber(unsigned int* seed) {
+  return rand_s();
+}
+
 int** alloc_matrix(int row, int column){
     omp_set_num_threads(GENERATE_THREAD_NUM);
     int** matrix = malloc(sizeof(int*)*row);
+    int i = 0;
 #pragma omp parallel for
-    for(int i = 0 ; i < row; ++i){
+    for(i = 0 ; i < row; ++i){
         matrix[i] = calloc(column, sizeof(int));
     }
     return matrix;
@@ -44,8 +49,9 @@ int** alloc_matrix(int row, int column){
 
 void free_matrix(int** matrix, int row){
     omp_set_num_threads(GENERATE_THREAD_NUM);
-#pragma omp parallel for
-    for(int i = 0 ;i < row;++i){
+    int i = 0;
+#pragma omp parallel for private(i)
+    for(i = 0 ;i < row;++i){
       free(matrix[i]);
     }
     free(matrix);
@@ -53,8 +59,9 @@ void free_matrix(int** matrix, int row){
 
 void zero_matrix(int** matrix, int row, int column){
     omp_set_num_threads(GENERATE_THREAD_NUM);
-#pragma omp parallel for
-    for(int i= 0; i<row; ++i){
+    int i = 0;
+#pragma omp parallel for private(i)
+    for(i = 0; i<row; ++i){
         for(int j =0; j< column; ++j){
             matrix[i][j] = 0;
         }
@@ -82,8 +89,9 @@ int** matrix_multiply(int **A, int **B, int size) {
 #pragma omp parallel
     {
         printf("thread_id:%d\n", omp_get_thread_num());
-#pragma omp for
-        for (int i = 0; i < size; ++i) {
+        int i = 0;
+#pragma omp for private(i)
+        for (i = 0; i < size; ++i) {
             for (int j = 0; j < size; ++j) {
                 C[i][j] = 0;
                 for (int k = 0; k < size; ++k) {
@@ -105,16 +113,17 @@ CompressedMatrix transform_sparse_to_compressed_matrix(int numRow, int numColumn
   ret.maxRowLength = 0;
 
   omp_set_num_threads(GENERATE_THREAD_NUM);
-#pragma omp parallel for
-  for (int i = 0; i < numRow; ++i) {
+  int i = 0;
+#pragma omp parallel for private(i)
+  for (i = 0; i < numRow; ++i) {
     for (int j = 0; j < numColumn; ++j) {
       B[i][j] = 0;
       C[i][j] = 0;
     }
   }
 
-#pragma omp parallel for
-  for (int i = 0; i < numRow; ++i) {
+#pragma omp parallel for private(i)
+  for (i = 0; i < numRow; ++i) {
     int col = 0;
     B[i] = calloc(numColumn, sizeof(int));
     C[i] = calloc(numColumn, sizeof(int));
@@ -129,8 +138,8 @@ CompressedMatrix transform_sparse_to_compressed_matrix(int numRow, int numColumn
       ret.maxRowLength = col;
     }
     ret.rowLengths[i] = col;
-    realloc(B[i], sizeof(int) * col);
-    realloc(C[i], sizeof(int) * col);
+    B[i] = realloc(B[i], sizeof(int) * col);
+    C[i] = realloc(C[i], sizeof(int) * col);
   }
 
   ret.B = B;
@@ -145,14 +154,15 @@ void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
   {
     //printf("thread_id:%d\n", omp_get_thread_num());
     int seed = sd * g_threadsPerProc + omp_get_thread_num();
-#pragma omp for
-    for (int i = 0; i < ROW_NUM; ++i) {
+    int i = 0;
+#pragma omp for private(i)
+    for (i = 0; i < ROW_NUM; ++i) {
       int nonZeroNum = 0;
       int* data = calloc(COLUMN_NUM, sizeof(int));
       int* index = calloc(COLUMN_NUM, sizeof(int));
       for (int j = 0; j < COLUMN_NUM; ++j) {
-        if (((double)rand_r(&seed) / RAND_MAX) < probability) {
-          data[nonZeroNum] = (rand_r(&seed) % 10) + 1;
+        if (((double)randomNumber(&seed) / RAND_MAX) < probability) {
+          data[nonZeroNum] = (randomNumber(&seed) % 10) + 1;
           index[nonZeroNum] = j;
           nonZeroNum += 1;
         }
@@ -186,8 +196,9 @@ int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread,
         }
         //printf("Thread_id:%d\n", omp_get_thread_num());
 
-#pragma omp for schedule(static, BLOCK_SIZE)
-        for (int i = iter_start; i < iter_end; ++i) {
+        int i = 0;
+#pragma omp for private(i) schedule(static, BLOCK_SIZE) 
+        for (i = iter_start; i < iter_end; ++i) {
             for (int k = 0; k < X.rowLengths[i]; ++k) {
                 int index = X.C[i][k];
                 for (int l = 0; l < Y.rowLengths[i]; ++l) {
@@ -202,14 +213,6 @@ int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread,
     printf("time spent = %10.6f\n", timeSpent);
 
     return matrix;
-}
-
-int mpi_parallel_write(int rank, int rowEachNode, CompressedMatrix m, const char* filenameB, const char* filenameC) {
-  int startRow = rank * rowEachNode;
-  int endRow = (rank + 1) * rowEachNode;
-  //calculate lengths;
-  char* buffer = calloc(COLUMN_NUM * 4, 1);
-  int pos = 0;
 }
 
 int mpi_independent_write(CompressedMatrix m, const char* filenameB, const char* filenameC) {
@@ -252,6 +255,8 @@ int mpi_independent_write(CompressedMatrix m, const char* filenameB, const char*
   }
   MPI_File_close(&fileB);
   MPI_File_close(&fileC);
+
+  return 0;
 }
 
 void initCompressedMatrix(CompressedMatrix* mat) {
@@ -303,6 +308,7 @@ void sample(int id, double probability, int rank, int numNode) {
   }
     
   //openmpi matrix multiplication
+  printf("start_omp_matrix_multiplication");
   int** output = omp_matrix_multiply(X, Y, g_threadsPerProc, rank, numNode);
   CompressedMatrix result = transform_sparse_to_compressed_matrix(rowEachNode, COLUMN_NUM, output);
   free_matrix(output, rowEachNode);
@@ -387,6 +393,7 @@ int main(int argc, char* argv[]){
     argv[3]:number of rows in each matrix
     argv[4]:number of nodes(TODO)
     */
+    double probability = 0.01;
     if (argc > 1) {
       g_writeToFile = atoi(argv[1]);
     }
@@ -397,7 +404,10 @@ int main(int argc, char* argv[]){
       g_numRows = atoi(argv[3]);
     }
     if (argc > 4) {
-      g_numNodes = atoi(argv[4]);
+      probability = atof(argv[4]);
+    }
+    if (argc > 5) {
+      g_numNodes = atoi(argv[5]);
     }
 
     int rank, size;
@@ -411,9 +421,7 @@ int main(int argc, char* argv[]){
       printf("thread_per_proc:%d\n", g_threadsPerProc);
     }
     
-    sample(1, 0.01, rank, size);
-    sample(2, 0.02, rank, size);
-    sample(3, 0.05, rank, size);
+    sample(0, probability, rank, size);
 
     MPI_Finalize();
 
