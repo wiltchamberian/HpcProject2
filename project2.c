@@ -15,12 +15,13 @@
 //the number of threads for generating matrix(no need to modify)
 #define GENERATE_THREAD_NUM 32
 
-//use different thread to test performance
-#define THREAD_NUM 4
-int numThreads[THREAD_NUM] = {8,16,32,64};
-
 //block_size for static schedule
 #define BLOCK_SIZE (ROW_NUM/32)
+
+//global variables
+int g_writeToFile = 0;
+int g_threadsPerProc = 64;
+int g_numNodes = 4;
 
 typedef struct CompressedMatrix {
   int** B;
@@ -34,7 +35,7 @@ int** alloc_matrix(int row, int column){
     omp_set_num_threads(GENERATE_THREAD_NUM);
     int** matrix = malloc(sizeof(int*)*row);
 #pragma omp parallel for
-    for(int i = 0 ;i<row;++i){
+    for(int i = 0 ; i < row; ++i){
         matrix[i] = calloc(column, sizeof(int));
     }
     return matrix;
@@ -237,6 +238,56 @@ int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread,
     return matrix;
 }
 
+int mpi_parallel_write(int rank, int rowEachNode, CompressedMatrix m, const char* filenameB, const char* filenameC) {
+  int startRow = rank * rowEachNode;
+  int endRow = (rank + 1) * rowEachNode;
+  //calculate lengths;
+  char* buffer = calloc(COLUMN_NUM * 4, 1);
+  int pos = 0;
+}
+
+int mpi_independent_write(CompressedMatrix m, const char* filenameB, const char* filenameC) {
+  MPI_File fileB;
+  int err = MPI_File_open(MPI_COMM_WORLD, filenameB, MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fileB);
+  MPI_File fileC;
+  int err1 = MPI_File_open(MPI_COMM_WORLD, filenameC, MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fileC);
+  if (err == MPI_SUCCESS && err1 == MPI_SUCCESS) {
+    char* buffer = calloc(COLUMN_NUM * 4, 1);
+    int pos = 0;
+
+    for (int k = 0; k < m.numRow; k++) {
+      pos = 0;
+      int size = m.rowLengths[k];
+      for (int i = 0; i < size; ++i) {
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%d", m.B[k][i]);
+        if (i < size - 1) {
+          pos += snprintf(buffer + pos, sizeof(buffer) - pos, ",");
+        }
+      }
+      snprintf(buffer + pos, sizeof(buffer) - pos, "\n");
+      MPI_File_write(fileB, buffer, pos + 1, MPI_CHAR, MPI_STATUS_IGNORE);
+    }
+    for (int k = 0; k < m.numRow; k++) {
+      pos = 0;
+      int size = m.rowLengths[k];
+      for (int i = 0; i < size; ++i) {
+        pos += snprintf(buffer + pos, sizeof(buffer) - pos, "%d", m.C[k][i]);
+        if (i < size - 1) {
+          pos += snprintf(buffer + pos, sizeof(buffer) - pos, ",");
+        }
+      }
+      snprintf(buffer + pos, sizeof(buffer) - pos, "\n");
+      MPI_File_write(fileC, buffer, pos + 1, MPI_CHAR, MPI_STATUS_IGNORE);
+    }
+    free(buffer);
+  }
+  else {
+    //TODO
+  }
+  MPI_File_close(&fileB);
+  MPI_File_close(&fileC);
+}
+
 void initCompressedMatrix(CompressedMatrix* mat) {
   mat->B = calloc(ROW_NUM, sizeof(int*));
   mat->C = calloc(ROW_NUM, sizeof(int*));
@@ -246,131 +297,145 @@ void initCompressedMatrix(CompressedMatrix* mat) {
 }
 
 void sample(int id, double probability, int rank, int numNode) {
-    printf("sample%d:\n", id);
-    MPI_Status status;
-    int rowEachNode = ROW_NUM / numNode;
-    CompressedMatrix X;
-    initCompressedMatrix(&X);
-    CompressedMatrix Y;
-    initCompressedMatrix(&Y);
-    if (rank == 0) {
-      fill_compressed_matrix(&X, probability, id);
-      fill_compressed_matrix(&Y, probability, id);
+  printf("sample%d:\n", id);
+  MPI_Status status;
+  int rowEachNode = ROW_NUM / numNode;
+  CompressedMatrix X;
+  initCompressedMatrix(&X);
+  CompressedMatrix Y;
+  initCompressedMatrix(&Y);
+  if (rank == 0) {
+    fill_compressed_matrix(&X, probability, id);
+    fill_compressed_matrix(&Y, probability, id);
+  }
 
-      //send X lengths to other nodes
-      for (int i = 1; i < numNode; ++i) {
-        MPI_Send(X.rowLengths, ROW_NUM, MPI_INT, i, 0, MPI_COMM_WORLD);
-      }
-      for (int i = 1; i < numNode; ++i) {
-        MPI_Send(Y.rowLengths, ROW_NUM, MPI_INT, i, 1, MPI_COMM_WORLD);
-      }
-    }
-    else {
-      MPI_Recv(X.rowLengths, ROW_NUM, MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-      MPI_Recv(Y.rowLengths, ROW_NUM, MPI_INT, 0, 1, MPI_COMM_WORLD, &status);
-    }
+  //send X and Y rowLengths to others
+  MPI_Bcast(X.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
+  MPI_Bcast(Y.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
 
-    //send X
-    if (rank == 0) {
-      //split X to rows and send to different nodes 
-      for (int i = rowEachNode; i < ROW_NUM; ++i) {
-        int dest = i / rowEachNode;
-        int tag = i;
-        MPI_Send(X.B[i], X.rowLengths[i], MPI_INT, dest, tag, MPI_COMM_WORLD);
-        MPI_Send(X.C[i], X.rowLengths[i], MPI_INT, dest, -tag - 1, MPI_COMM_WORLD);
-      }
-    } else {
-      for (int i = rank * rowEachNode; i < (rank+1)* rowEachNode; ++i) {
-        X.B[i] = calloc(X.rowLengths[i], sizeof(int));
-        MPI_Recv(X.B[i], X.rowLengths[i], MPI_INT, 0, i, MPI_COMM_WORLD, &status);
-        X.C[i] = calloc(X.rowLengths[i], sizeof(int));
-        MPI_Recv(X.C[i], X.rowLengths[i], MPI_INT, 0, -i - 1, MPI_COMM_WORLD, &status);
-      }
+  //send X
+  if (rank == 0) {
+    //split X to rows and send to different nodes 
+    for (int i = rowEachNode; i < ROW_NUM; ++i) {
+      int dest = i / rowEachNode;
+      int tag = i;
+      MPI_Send(X.B[i], X.rowLengths[i], MPI_INT, dest, tag, MPI_COMM_WORLD);
+      MPI_Send(X.C[i], X.rowLengths[i], MPI_INT, dest, -tag - 1, MPI_COMM_WORLD);
     }
-
-    //send Y
-    if (rank == 0) {
-      for (int dest = 1; dest < numNode; ++dest) {
-        for (int i = 0; i < ROW_NUM; ++i) {
-          MPI_Send(Y.B[i], Y.rowLengths[i], MPI_INT, dest, i, MPI_COMM_WORLD);
-          MPI_Send(Y.C[i], Y.rowLengths[i], MPI_INT, dest, -i - 1, MPI_COMM_WORLD);
-        }
-      }
+  } else {
+    for (int i = rank * rowEachNode; i < (rank+1)* rowEachNode; ++i) {
+      X.B[i] = calloc(X.rowLengths[i], sizeof(int));
+      MPI_Recv(X.B[i], X.rowLengths[i], MPI_INT, 0, i, MPI_COMM_WORLD, &status);
+      X.C[i] = calloc(X.rowLengths[i], sizeof(int));
+      MPI_Recv(X.C[i], X.rowLengths[i], MPI_INT, 0, -i - 1, MPI_COMM_WORLD, &status);
     }
-    else {
-      for (int i = 0; i < ROW_NUM; ++i) {
-        MPI_Recv(Y.B[i], Y.rowLengths[i], MPI_INT, 0, i, MPI_COMM_WORLD, &status);
-        MPI_Recv(Y.C[i], Y.rowLengths[i], MPI_INT, 0, -i - 1, MPI_COMM_WORLD, &status);
-      }
-    }
+  }
 
-    //openmpi matrix multiplication
-    int** output = omp_matrix_multiply(X, Y, numThreads[0], rank, numNode);
-    CompressedMatrix result = transform_sparse_to_compressed_matrix(rowEachNode, COLUMN_NUM, output);
-    free_matrix(output, rowEachNode);
+  //broadcast Y to others
+  for (int i = 0; i < ROW_NUM; ++i) {
+    MPI_Bcast(Y.B[i], Y.rowLengths[i], MPI_INT, 0, MPI_COMM_WORLD);
+    MPI_Bcast(Y.C[i], Y.rowLengths[i], MPI_INT, 0, MPI_COMM_WORLD);
+  }
+    
+  //openmpi matrix multiplication
+  int** output = omp_matrix_multiply(X, Y, g_threadsPerProc, rank, numNode);
+  CompressedMatrix result = transform_sparse_to_compressed_matrix(rowEachNode, COLUMN_NUM, output);
+  free_matrix(output, rowEachNode);
 
-    //recv result
-    CompressedMatrix finalResult;
+
+  //recv result
+  CompressedMatrix finalResult;
+  if (rank == 0) {
     initCompressedMatrix(&finalResult);
+  }
 
-    //send result length to master
-    if (rank != 0) {
-      MPI_Send(result.rowLengths, rowEachNode, MPI_INT, 0, 0, MPI_COMM_WORLD);
+  //send result length to master
+  if (rank != 0) {
+    MPI_Send(result.rowLengths, rowEachNode, MPI_INT, 0, 0, MPI_COMM_WORLD);
+  }
+  if (rank == 0) {
+    for (int i = 1; i < numNode; ++i) {
+      MPI_Recv(finalResult.rowLengths + rowEachNode * rank, rowEachNode, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
     }
-    if (rank == 0) {
-      for (int i = 1; i < numNode; ++i) {
-        MPI_Recv(finalResult.rowLengths + rowEachNode * rank, rowEachNode, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
+    for (int j = 0; j < rowEachNode; ++j) {
+      finalResult.rowLengths[j] = result.rowLengths[j];
+    }
+  }
+
+  //send result to master
+  if (rank != 0) {
+    for (int i = 0; i < rowEachNode; ++i) {
+      MPI_Send(result.B[i], result.rowLengths[i], MPI_INT, 0, rank, MPI_COMM_WORLD);
+    }
+    for (int i = 0; i < rowEachNode; ++i) {
+      MPI_Send(result.C[i], result.rowLengths[i], MPI_INT, 0, -rank, MPI_COMM_WORLD);
+    }
+  }
+
+  //master receive results
+  if (rank == 0) {
+    for (int i = 1; i < numNode; ++i) {
+      for (int j = 0; j < rowEachNode; ++j) {
+        finalResult.B[i * rowEachNode + j] = calloc(finalResult.rowLengths[i * rowEachNode + j], sizeof(int));
+        MPI_Recv(finalResult.B[i * rowEachNode + j], finalResult.rowLengths[i * rowEachNode + j], MPI_INT, i, i, MPI_COMM_WORLD, &status);
       }
       for (int j = 0; j < rowEachNode; ++j) {
-        finalResult.rowLengths[j] = result.rowLengths[j];
+        finalResult.C[i * rowEachNode + j] = calloc(finalResult.rowLengths[i * rowEachNode + j], sizeof(int));
+        MPI_Recv(finalResult.C[i * rowEachNode + j], finalResult.rowLengths[i * rowEachNode + j], MPI_INT, i, -i, MPI_COMM_WORLD, &status);
       }
     }
-
-    //send result to master
-    if (rank != 0) {
-      for (int i = 0; i < rowEachNode; ++i) {
-        MPI_Send(result.B[i], result.rowLengths[i], MPI_INT, 0, rank, MPI_COMM_WORLD);
-      }
-      for (int i = 0; i < rowEachNode; ++i) {
-        MPI_Send(result.C[i], result.rowLengths[i], MPI_INT, 0, -rank, MPI_COMM_WORLD);
-      }
+    for (int j = 0; j < rowEachNode; ++j) {
+      finalResult.B[j] = result.B[j];
+      finalResult.C[j] = result.C[j];
     }
+  }
 
-    if (rank == 0) {
-      for (int i = 1; i < numNode; ++i) {
-        for (int j = 0; j < rowEachNode; ++j) {
-          MPI_Recv(finalResult.B[i*rowEachNode+j], finalResult.rowLengths[i*rowEachNode+j ],MPI_INT, i,i,MPI_COMM_WORLD,&status);
-        }
-        for (int j = 0; j < rowEachNode; ++j) {
-          MPI_Recv(finalResult.C[i * rowEachNode + j], finalResult.rowLengths[i * rowEachNode + j], MPI_INT, i, -i, MPI_COMM_WORLD, &status);
-        }
-      }
-      for (int j = 0; j < rowEachNode; ++j) {
-        finalResult.B[j] = result.B[j];
-        finalResult.C[j] = result.C[j];
-      }
-    }
+  //write  to file (do we need to support parallel writing? TODO)
+  if (g_writeToFile != 0 && rank == 0) {
+    mpi_independent_write(X, "XB.txt", "XC.txt");
+    mpi_independent_write(Y, "YB.txt", "YC.txt");
+    mpi_independent_write(finalResult, "XYB.txt", "XYC.txt");
+  }
+  else {
 
-    //free memory
-    if (rank != 0) {
-      free_compressed_matrix(&result);
-    }
-    if (rank == 0) {
-      free(result.rowLengths);
-    }
-    free_compressed_matrix(&X);
-    free_compressed_matrix(&Y);
+  }
 
-    if (rank == 0) {
-      //TODO: write to file
+  //free memory
+  printf("start_free_memory\n");
+  if (rank != 0) {
+    free_compressed_matrix(&result);
+  }
+  if (rank == 0) {
+    free(result.B);
+    free(result.C);
+    free(result.rowLengths);
+  }
+  free_compressed_matrix(&X);
+  free_compressed_matrix(&Y);
 
-
-      free_compressed_matrix(&finalResult);
-    }
+  if (rank == 0) {
+    free_compressed_matrix(&finalResult);
+  }
 }
+
 
 int main(int argc, char* argv[]){
     //TODO: test
+
+    /*
+    argv[1]:write to file or not, if not exsit, not write to file
+    argv[2]:number of threads in each node to be used, default 64
+    argv[3]:number of nodes(TODO)
+    */
+    if (argc > 1) {
+      g_writeToFile = atoi(argv[1]);
+    }
+    if (argc > 2) {
+      g_threadsPerProc = atoi(argv[2]);
+    }
+    if (argc > 3) {
+      g_numNodes = atoi(argv[3]);
+    }
 
     int rank, size;
     MPI_Init(&argc, &argv);
