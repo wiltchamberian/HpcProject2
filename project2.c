@@ -5,8 +5,14 @@
 #include <omp.h>
 #include <mpi.h>
 
+//global variables
+int g_writeToFile = 0;
+int g_threadsPerProc = 64;
+int g_numNodes = 4;
+int g_numRows = 100000;
+
 //dimension of the matrix
-#define ROW_COLUMN_NUM ((int64_t)100000)
+#define ROW_COLUMN_NUM g_numRows
 #define ROW_NUM ROW_COLUMN_NUM
 #define COLUMN_NUM ROW_COLUMN_NUM
 
@@ -17,11 +23,6 @@
 
 //block_size for static schedule
 #define BLOCK_SIZE (ROW_NUM/32)
-
-//global variables
-int g_writeToFile = 0;
-int g_threadsPerProc = 64;
-int g_numNodes = 4;
 
 typedef struct CompressedMatrix {
   int** B;
@@ -139,10 +140,11 @@ CompressedMatrix transform_sparse_to_compressed_matrix(int numRow, int numColumn
 }
 
 void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
+  omp_set_num_threads(g_threadsPerProc);
 #pragma omp parallel
   {
     //printf("thread_id:%d\n", omp_get_thread_num());
-    int seed = sd + omp_get_thread_num();
+    int seed = sd * g_threadsPerProc + omp_get_thread_num();
 #pragma omp for
     for (int i = 0; i < ROW_NUM; ++i) {
       int nonZeroNum = 0;
@@ -282,16 +284,15 @@ void sample(int id, double probability, int rank, int numNode) {
     //split X to rows and send to different nodes 
     for (int i = rowEachNode; i < ROW_NUM; ++i) {
       int dest = i / rowEachNode;
-      int tag = i;
-      MPI_Send(X.B[i], X.rowLengths[i], MPI_INT, dest, tag, MPI_COMM_WORLD);
-      MPI_Send(X.C[i], X.rowLengths[i], MPI_INT, dest, -tag - 1, MPI_COMM_WORLD);
+      MPI_Send(X.B[i], X.rowLengths[i], MPI_INT, dest, 0, MPI_COMM_WORLD);
+      MPI_Send(X.C[i], X.rowLengths[i], MPI_INT, dest, 0, MPI_COMM_WORLD);
     }
   } else {
     for (int i = rank * rowEachNode; i < (rank+1)* rowEachNode; ++i) {
       X.B[i] = calloc(X.rowLengths[i], sizeof(int));
-      MPI_Recv(X.B[i], X.rowLengths[i], MPI_INT, 0, i, MPI_COMM_WORLD, &status);
+      MPI_Recv(X.B[i], X.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
       X.C[i] = calloc(X.rowLengths[i], sizeof(int));
-      MPI_Recv(X.C[i], X.rowLengths[i], MPI_INT, 0, -i - 1, MPI_COMM_WORLD, &status);
+      MPI_Recv(X.C[i], X.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
     }
   }
 
@@ -319,7 +320,7 @@ void sample(int id, double probability, int rank, int numNode) {
   }
   if (rank == 0) {
     for (int i = 1; i < numNode; ++i) {
-      MPI_Recv(finalResult.rowLengths + rowEachNode * rank, rowEachNode, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
+      MPI_Recv(finalResult.rowLengths + rowEachNode * i, rowEachNode, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
     }
     for (int j = 0; j < rowEachNode; ++j) {
       finalResult.rowLengths[j] = result.rowLengths[j];
@@ -329,23 +330,19 @@ void sample(int id, double probability, int rank, int numNode) {
   //send result to master
   if (rank != 0) {
     for (int i = 0; i < rowEachNode; ++i) {
-      MPI_Send(result.B[i], result.rowLengths[i], MPI_INT, 0, rank, MPI_COMM_WORLD);
-    }
-    for (int i = 0; i < rowEachNode; ++i) {
-      MPI_Send(result.C[i], result.rowLengths[i], MPI_INT, 0, -rank, MPI_COMM_WORLD);
+      MPI_Send(result.B[i], result.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD);
+      MPI_Send(result.C[i], result.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD);
     }
   }
-
   //master receive results
   if (rank == 0) {
-    for (int i = 1; i < numNode; ++i) {
-      for (int j = 0; j < rowEachNode; ++j) {
-        finalResult.B[i * rowEachNode + j] = calloc(finalResult.rowLengths[i * rowEachNode + j], sizeof(int));
-        MPI_Recv(finalResult.B[i * rowEachNode + j], finalResult.rowLengths[i * rowEachNode + j], MPI_INT, i, i, MPI_COMM_WORLD, &status);
-      }
-      for (int j = 0; j < rowEachNode; ++j) {
-        finalResult.C[i * rowEachNode + j] = calloc(finalResult.rowLengths[i * rowEachNode + j], sizeof(int));
-        MPI_Recv(finalResult.C[i * rowEachNode + j], finalResult.rowLengths[i * rowEachNode + j], MPI_INT, i, -i, MPI_COMM_WORLD, &status);
+    for (int j = 0; j < rowEachNode; ++j) {
+      for (int i = 1; i < numNode; ++i) {
+        int index = i * rowEachNode + j;
+        finalResult.B[index] = calloc(finalResult.rowLengths[index], sizeof(int));
+        MPI_Recv(finalResult.B[index], finalResult.rowLengths[index], MPI_INT, i, 0, MPI_COMM_WORLD, &status);
+        finalResult.C[index] = calloc(finalResult.rowLengths[index], sizeof(int));
+        MPI_Recv(finalResult.C[index], finalResult.rowLengths[index], MPI_INT, i, 0, MPI_COMM_WORLD, &status);
       }
     }
     for (int j = 0; j < rowEachNode; ++j) {
@@ -384,12 +381,11 @@ void sample(int id, double probability, int rank, int numNode) {
 
 
 int main(int argc, char* argv[]){
-    //TODO: test
-
     /*
     argv[1]:write to file or not, if not exsit, not write to file
     argv[2]:number of threads in each node to be used, default 64
-    argv[3]:number of nodes(TODO)
+    argv[3]:number of rows in each matrix
+    argv[4]:number of nodes(TODO)
     */
     if (argc > 1) {
       g_writeToFile = atoi(argv[1]);
@@ -398,7 +394,10 @@ int main(int argc, char* argv[]){
       g_threadsPerProc = atoi(argv[2]);
     }
     if (argc > 3) {
-      g_numNodes = atoi(argv[3]);
+      g_numRows = atoi(argv[3]);
+    }
+    if (argc > 4) {
+      g_numNodes = atoi(argv[4]);
     }
 
     int rank, size;
@@ -406,6 +405,12 @@ int main(int argc, char* argv[]){
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
 
+    if (rank == 0) {
+      printf("matrix_rows:%d\n", ROW_NUM);
+      printf("mpi_numNodes:%d\n", size);
+      printf("thread_per_proc:%d\n", g_threadsPerProc);
+    }
+    
     sample(1, 0.01, rank, size);
     sample(2, 0.02, rank, size);
     sample(3, 0.05, rank, size);
