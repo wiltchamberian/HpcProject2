@@ -165,42 +165,6 @@ void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
   return;
 }
 
-int** generate_sparse_matrix(int* maxNonZero, double probability, int sd){
-    int** matrix = alloc_matrix(ROW_NUM,COLUMN_NUM);
-    int* maxValues = malloc(sizeof(int) * ROW_NUM);
-    int max = 0;
-    omp_set_num_threads(GENERATE_THREAD_NUM);
-#pragma omp parallel
-    {
-        //printf("thread_id:%d\n", omp_get_thread_num());
-        int seed = sd + omp_get_thread_num();
-#pragma omp for
-        for (int i = 0; i < ROW_NUM; ++i) {
-            int nonZeroNum = 0;
-            for (int j = 0; j < COLUMN_NUM; ++j) {
-                if (((double)rand_r(&seed) / RAND_MAX) < probability) {
-                    nonZeroNum += 1;
-                    matrix[i][j] = (rand_r(&seed) % 10) + 1;
-                }
-                else {
-                    matrix[i][j] = 0;
-                }
-            }
-            maxValues[i] = nonZeroNum;
-        }
-    }
-
-    for (int i = 0; i < ROW_NUM; ++i) {
-        if (maxValues[i] > max) {
-            max = maxValues[i];
-        }
-    }
-    *maxNonZero = max;
-
-    free(maxValues);
-    return matrix;
-}
-
 int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread, int rank, int numNode){
     int numRows = ROW_NUM / numNode;
     int** matrix = alloc_matrix(numRows, COLUMN_NUM);
