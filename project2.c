@@ -6,7 +6,7 @@
 #include <mpi.h>
 
 //update after each modification
-#define VERSION 1.03
+#define VERSION 2.0
 
 //global variables
 int g_writeToFile = 0;
@@ -37,7 +37,7 @@ typedef struct CompressedMatrix {
 
 int randomNumber(unsigned int* seed) {
 #ifdef _WIN32
-  return rand_s();
+  return 7;
 #else 
   return rand_r(seed);
 #endif
@@ -126,14 +126,6 @@ CompressedMatrix transform_sparse_to_compressed_matrix(int numRow, int numColumn
   int i = 0;
 #pragma omp parallel for private(i)
   for (i = 0; i < numRow; ++i) {
-    for (int j = 0; j < numColumn; ++j) {
-      B[i][j] = 0;
-      C[i][j] = 0;
-    }
-  }
-
-#pragma omp parallel for private(i)
-  for (i = 0; i < numRow; ++i) {
     int col = 0;
     B[i] = calloc(numColumn, sizeof(int));
     C[i] = calloc(numColumn, sizeof(int));
@@ -204,10 +196,8 @@ int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread,
         {
             printf("Number of threads in parallel region: %d\n", omp_get_num_threads());   
         }
-        //printf("Thread_id:%d\n", omp_get_thread_num());
-
         int i = 0;
-#pragma omp for private(i) schedule(static, BLOCK_SIZE) 
+#pragma omp for private(i) schedule(runtime) 
         for (i = iter_start; i < iter_end; ++i) {
             for (int k = 0; k < X.rowLengths[i]; ++k) {
                 int index = X.C[i][k];
@@ -225,12 +215,35 @@ int** omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread,
     return matrix;
 }
 
-int mpi_independent_write(CompressedMatrix m, const char* filenameB, const char* filenameC) {
+int write_file(CompressedMatrix m, const char* filenameB, const char* filenameC) {
+  FILE* fp = fopen(filenameB, "w");
+  FILE* fp2 = fopen(filenameC, "w");
+  if (fp != NULL && fp2 != NULL) {
+    for (int i = 0; i < m.numRow; ++i) {
+      for (int j = 0; j < m.rowLengths[i]; ++j) {
+        fprintf(fp, "%d", m.B[i][j]);
+        fprintf(fp2, "%d", m.C[i][j]);
+        if (j < m.rowLengths[i] - 1) {
+          fprintf(fp, ",");
+          fprintf(fp2, ",");
+        }
+      }
+      fprintf(fp, "\n");
+      fprintf(fp2, "\n");
+    }
+    fclose(fp);
+    fclose(fp2);
+    return 1;
+  }
+  return 0;
+}
+
+int mpi_independent_write(int rank, CompressedMatrix m, const char* filenameB, const char* filenameC) {
   MPI_File fileB;
   int err = MPI_File_open(MPI_COMM_WORLD, filenameB, MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fileB);
   MPI_File fileC;
   int err1 = MPI_File_open(MPI_COMM_WORLD, filenameC, MPI_MODE_CREATE | MPI_MODE_WRONLY, MPI_INFO_NULL, &fileC);
-  if (err == MPI_SUCCESS && err1 == MPI_SUCCESS) {
+  if (err == MPI_SUCCESS && err1 == MPI_SUCCESS && rank == 0) {
     char* buffer = calloc(COLUMN_NUM * 4, 1);
     int pos = 0;
 
@@ -278,6 +291,9 @@ void initCompressedMatrix(CompressedMatrix* mat) {
 }
 
 void sample(int id, double probability, int rank, int numNode) {
+
+  double startTime = omp_get_wtime();
+
   printf("sample%d:\n", id);
   MPI_Status status;
   int rowEachNode = ROW_NUM / numNode;
@@ -291,10 +307,21 @@ void sample(int id, double probability, int rank, int numNode) {
   }
 
   //send X and Y rowLengths to others
+  printf("bcast rowlengths\n");
   MPI_Bcast(X.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
   MPI_Bcast(Y.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
 
+  //according to rowLengths alloc Y.B, Y.C memory space
+  if (rank != 0) {
+    for (int i = 0; i < Y.numRow; ++i) {
+      Y.B[i] = calloc(Y.rowLengths[i], sizeof(int));
+      Y.C[i] = calloc(Y.rowLengths[i], sizeof(int));
+    }
+  }
+
+
   //send X
+  printf("send X\n");
   if (rank == 0) {
     //split X to rows and send to different nodes 
     for (int i = rowEachNode; i < ROW_NUM; ++i) {
@@ -312,6 +339,7 @@ void sample(int id, double probability, int rank, int numNode) {
   }
 
   //broadcast Y to others
+  printf("bcast Y\n");
   for (int i = 0; i < ROW_NUM; ++i) {
     MPI_Bcast(Y.B[i], Y.rowLengths[i], MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(Y.C[i], Y.rowLengths[i], MPI_INT, 0, MPI_COMM_WORLD);
@@ -373,11 +401,16 @@ void sample(int id, double probability, int rank, int numNode) {
   }
 
   //write  to file (do we need to support parallel writing? TODO)
-  if (g_writeToFile != 0 && rank == 0) {
+  if (g_writeToFile != 0) {
     printf("write to file\n");
-    mpi_independent_write(X, "XB.txt", "XC.txt");
-    mpi_independent_write(Y, "YB.txt", "YC.txt");
-    mpi_independent_write(finalResult, "XYB.txt", "XYC.txt");
+    //mpi_independent_write(rank, X, "XB.txt", "XC.txt");
+    //mpi_independent_write(rank, Y, "YB.txt", "YC.txt");
+    //mpi_independent_write(rank, finalResult, "XYB.txt", "XYC.txt");
+    if (rank == 0) {
+      write_file(X, "XB.txt", "XC.txt");
+      write_file(Y, "YB.txt", "YC.txt");
+      write_file(finalResult, "XYB.txt", "XYC.txt");
+    }
   }
   else {
 
@@ -399,6 +432,12 @@ void sample(int id, double probability, int rank, int numNode) {
   if (rank == 0) {
     free_compressed_matrix(&finalResult);
   }
+
+  //master thread have received all, so comput time consuming
+  double endTime = omp_get_wtime();
+  if (rank == 0) {
+    printf("total_time_spent = %10.6f\n", endTime - startTime);
+  }
 }
 
 
@@ -416,19 +455,19 @@ int main(int argc, char* argv[]){
     if (argc > 4) {
       probability = atof(argv[4]);
     }
-    if (argc > 5) {
-      g_numNodes = atoi(argv[5]);
-    }
 
     int rank, size;
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &size);
+    g_numNodes = size;
 
     if (rank == 0) {
       printf("matrix_rows:%d\n", ROW_NUM);
       printf("mpi_numNodes:%d\n", size);
       printf("thread_per_proc:%d\n", g_threadsPerProc);
+      printf("probability:%f\n", probability);
+      printf("write_to_file:%d\n", g_writeToFile);
     }
     
     sample(0, probability, rank, size);
