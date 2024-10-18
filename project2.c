@@ -7,13 +7,14 @@
 #include <mpi.h>
 
 //update after each modification
-#define VERSION 2.2
+#define VERSION 2.3
 
 //global variables
 int g_writeToFile = 0;
 int g_threadsPerProc = 64;
 int g_numNodes = 4;
 int g_numRows = 100000;
+int g_seed = 0;
 
 //dimension of the matrix
 #define ROW_COLUMN_NUM g_numRows
@@ -137,7 +138,7 @@ void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
 #pragma omp parallel
   {
     //printf("thread_id:%d\n", omp_get_thread_num());
-    int seed = sd * g_threadsPerProc + omp_get_thread_num();
+    int seed = g_seed + sd * g_threadsPerProc + omp_get_thread_num();
     int i = 0;
 #pragma omp for private(i)
     for (i = 0; i < ROW_NUM; ++i) {
@@ -285,9 +286,6 @@ int mpi_independent_write(int rank, CompressedMatrix m, const char* filenameB, c
 }
 
 void sample(int id, double probability, int rank, int numNode) {
-
-  double startTime = omp_get_wtime();
-
   printf("sample%d:\n", id);
   MPI_Status status;
   int rowEachNode = ROW_NUM / numNode;
@@ -297,7 +295,7 @@ void sample(int id, double probability, int rank, int numNode) {
     initCompressedMatrix(&X, ROW_NUM);
     initCompressedMatrix(&Y, ROW_NUM);
     fill_compressed_matrix(&X, probability, id);
-    fill_compressed_matrix(&Y, probability, id);
+    fill_compressed_matrix(&Y, probability, id+100);
   }
   else {
     initCompressedMatrix(&X, rowEachNode);
@@ -364,17 +362,7 @@ void sample(int id, double probability, int rank, int numNode) {
 
   //send result length to master
   printf("send result length to master\n");
-  if (rank != 0) {
-    MPI_Send(result.rowLengths, rowEachNode, MPI_INT, 0, 0, MPI_COMM_WORLD);
-  }
-  if (rank == 0) {
-    for (int i = 1; i < numNode; ++i) {
-      MPI_Recv(finalResult.rowLengths + rowEachNode * i, rowEachNode, MPI_INT, i, 0, MPI_COMM_WORLD, &status);
-    }
-    for (int j = 0; j < rowEachNode; ++j) {
-      finalResult.rowLengths[j] = result.rowLengths[j];
-    }
-  }
+  MPI_Gather(result.rowLengths, rowEachNode, MPI_INT, finalResult.rowLengths, rowEachNode, MPI_INT, 0, MPI_COMM_WORLD);
 
   //send result to master
   printf("send result to master\n");
@@ -434,11 +422,6 @@ void sample(int id, double probability, int rank, int numNode) {
     free_compressed_matrix(&finalResult);
   }
 
-  //master thread have received all, so comput time consuming
-  double endTime = omp_get_wtime();
-  if (rank == 0) {
-    printf("total_time_spent = %10.6f\n", endTime - startTime);
-  }
 }
 
 
@@ -456,6 +439,9 @@ int main(int argc, char* argv[]){
     if (argc > 4) {
       probability = atof(argv[4]);
     }
+    if (argc > 5) {
+      g_seed = atoi(argv[5]);
+    }
 
     int rank, size;
     MPI_Init(&argc, &argv);
@@ -471,7 +457,16 @@ int main(int argc, char* argv[]){
       printf("write_to_file:%d\n", g_writeToFile);
     }
     
+    double startTime = MPI_Wtime();
     sample(0, probability, rank, size);
+    double endTime = MPI_Wtime();
+    double elapsedTime = endTime - startTime;
+
+    double maxTime = 0.0;
+    MPI_Reduce(&elapsedTime, &maxTime, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    if (rank == 0) {
+      printf("total_time_spent = %10.6f\n", endTime - startTime);
+    }
 
     MPI_Finalize();
 
