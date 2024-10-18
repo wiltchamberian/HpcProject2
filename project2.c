@@ -1,12 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 #include <time.h>
 #include <omp.h>
 #include <mpi.h>
 
 //update after each modification
-#define VERSION 2.1
+#define VERSION 2.2
 
 //global variables
 int g_writeToFile = 0;
@@ -43,6 +44,14 @@ void initCompressedMatrix(CompressedMatrix* mat, int rowNum) {
   mat->maxRowLength = 0;
 }
 
+void* reAlloc(void* data, int newSize, int newCount) {
+  int* newData = calloc(newCount, newSize);
+  if (newData != NULL) {
+    memcpy(newData, data, newCount * newSize);
+  }
+  free(data);
+  return newData;
+}
 
 int randomNumber(unsigned int* seed) {
 #ifdef _WIN32
@@ -144,26 +153,22 @@ void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
       }
       mat->maxRowLength = nonZeroNum > mat->maxRowLength ? nonZeroNum : mat->maxRowLength;
       mat->rowLengths[i] = nonZeroNum;
-      mat->B[i] = realloc(data, sizeof(int)* nonZeroNum);
-      mat->C[i] = realloc(index, sizeof(int) * nonZeroNum);
+      
+      mat->B[i] = reAlloc(data, sizeof(int), nonZeroNum);
+      mat->C[i] = reAlloc(index, sizeof(int), nonZeroNum);
     }
   }
 
   return;
 }
 
-CompressedMatrix omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread, int rank, int numNode){
-    int numRows = ROW_NUM / numNode;
-
+CompressedMatrix omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int numThread, int numRows){
     CompressedMatrix result;
     initCompressedMatrix(&result, numRows);
   
     printf("start_parallel\n");
     omp_set_num_threads(numThread);
     double start = omp_get_wtime();
-
-    int iter_start = rank * numRows;
-    int iter_end = (rank + 1) * numRows;
 
 #pragma omp parallel 
     {
@@ -173,34 +178,34 @@ CompressedMatrix omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int
         }
         int i = 0;
 #pragma omp for private(i) schedule(runtime) 
-        for (i = iter_start; i < iter_end; ++i) {
-            result.B[i - iter_start] = calloc(COLUMN_NUM, sizeof(int));
-            result.C[i - iter_start] = calloc(COLUMN_NUM, sizeof(int));
+        for (i = 0; i < numRows; ++i) {
+            result.B[i] = calloc(COLUMN_NUM, sizeof(int));
+            result.C[i] = calloc(COLUMN_NUM, sizeof(int));
             for (int k = 0; k < X.rowLengths[i]; ++k) {
                 int index = X.C[i][k];
                 for (int l = 0; l < Y.rowLengths[index]; ++l) {
-                    result.B[ i- iter_start][Y.C[index][l]] += X.B[i][k] * Y.B[index][l];
+                    result.B[i][Y.C[index][l]] += X.B[i][k] * Y.B[index][l];
                 }
             }
             int col = 0;
             for (int s = 0; s < numRows; ++s) {
-                if (result.B[i - iter_start][s] != 0) {
-                    result.C[i - iter_start][col] = s;
-                    result.B[i - iter_start][col] = result.B[i - iter_start][s];
+                if (result.B[i][s] != 0) {
+                    result.C[i][col] = s;
+                    result.B[i][col] = result.B[i][s];
                     col += 1;
                 }
             }
             if (col > 0) {
-              result.B[i - iter_start] = realloc(result.B[i - iter_start], col * sizeof(int));
-              result.C[i - iter_start] = realloc(result.C[i - iter_start], col * sizeof(int));
+              result.B[i] = reAlloc(result.B[i], col, sizeof(int));
+              result.C[i] = reAlloc(result.C[i], col, sizeof(int));
             }
             else {
-              free(result.B[i - iter_start]);
-              result.B[i - iter_start] = NULL;
-              free(result.C[i - iter_start]);
-              result.C[i - iter_start] = NULL;
+              free(result.B[i]);
+              result.B[i] = NULL;
+              free(result.C[i]);
+              result.C[i] = NULL;
             }
-            result.rowLengths[i - iter_start] = col;
+            result.rowLengths[i] = col;
             //result.maxRowLength = col ? (col > result.maxRowLength) : result.maxRowLength;
         }
 
@@ -287,25 +292,39 @@ void sample(int id, double probability, int rank, int numNode) {
   MPI_Status status;
   int rowEachNode = ROW_NUM / numNode;
   CompressedMatrix X;
-  initCompressedMatrix(&X, ROW_NUM);
   CompressedMatrix Y;
-  initCompressedMatrix(&Y, ROW_NUM);
   if (rank == 0) {
+    initCompressedMatrix(&X, ROW_NUM);
+    initCompressedMatrix(&Y, ROW_NUM);
     fill_compressed_matrix(&X, probability, id);
     fill_compressed_matrix(&Y, probability, id);
+  }
+  else {
+    initCompressedMatrix(&X, rowEachNode);
+    initCompressedMatrix(&Y, ROW_NUM);
   }
 
   //send X and Y rowLengths to others
   printf("bcast rowlengths\n");
-  MPI_Bcast(X.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
   MPI_Bcast(Y.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
+  int* buf = malloc(sizeof(int) * rowEachNode);
+  MPI_Scatter(X.rowLengths, rowEachNode, MPI_INT, buf, rowEachNode, MPI_INT, 0, MPI_COMM_WORLD);
 
   //according to rowLengths alloc Y.B, Y.C memory space
   if (rank != 0) {
+    free(X.rowLengths);
+    X.rowLengths = buf;
     for (int i = 0; i < Y.numRow; ++i) {
       Y.B[i] = calloc(Y.rowLengths[i], sizeof(int));
       Y.C[i] = calloc(Y.rowLengths[i], sizeof(int));
     }
+    for (int i = 0; i < rowEachNode; ++i) {
+      X.B[i] = calloc(X.rowLengths[i], sizeof(int));
+      X.C[i] = calloc(X.rowLengths[i], sizeof(int));
+    }
+  }
+  else {
+    free(buf);
   }
 
 
@@ -319,10 +338,8 @@ void sample(int id, double probability, int rank, int numNode) {
       MPI_Send(X.C[i], X.rowLengths[i], MPI_INT, dest, 0, MPI_COMM_WORLD);
     }
   } else {
-    for (int i = rank * rowEachNode; i < (rank+1)* rowEachNode; ++i) {
-      X.B[i] = calloc(X.rowLengths[i], sizeof(int));
+    for (int i = 0; i < rowEachNode; ++i) {
       MPI_Recv(X.B[i], X.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
-      X.C[i] = calloc(X.rowLengths[i], sizeof(int));
       MPI_Recv(X.C[i], X.rowLengths[i], MPI_INT, 0, 0, MPI_COMM_WORLD, &status);
     }
   }
@@ -336,7 +353,7 @@ void sample(int id, double probability, int rank, int numNode) {
     
   //openmpi matrix multiplication
   printf("start_omp_matrix_multiplication\n");
-  CompressedMatrix result = omp_matrix_multiply(X, Y, g_threadsPerProc, rank, numNode);
+  CompressedMatrix result = omp_matrix_multiply(X, Y, g_threadsPerProc, rowEachNode);
 
   //recv result
   printf("recv result\n");
