@@ -108,26 +108,6 @@ void free_compressed_matrix(CompressedMatrix* m) {
     }
 }
 
-int** matrix_multiply(int **A, int **B, int size) {
-    int** C = alloc_matrix(size, size);
-    omp_set_num_threads(GENERATE_THREAD_NUM);
-    printf("matrix_multiply_start\n");
-#pragma omp parallel
-    {
-        printf("thread_id:%d\n", omp_get_thread_num());
-#pragma omp for
-        for (int i = 0; i < size; ++i) {
-            for (int j = 0; j < size; ++j) {
-                C[i][j] = 0;
-                for (int k = 0; k < size; ++k) {
-                    C[i][j] += A[i][k] * B[k][j];
-                }
-            }
-        }
-    }
-    printf("matrix_multiply_end\n");
-    return C;
-}
 
 void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
   omp_set_num_threads(g_threadsPerProc);
@@ -297,6 +277,8 @@ void sample(int id, double probability, int rank, int numNode) {
     initCompressedMatrix(&Y, ROW_NUM);
   }
 
+  double firstSendTimeStart = MPI_Wtime();
+
   //send X and Y rowLengths to others
   printf("bcast rowlengths\n");
   MPI_Bcast(Y.rowLengths, ROW_NUM, MPI_INT, 0, MPI_COMM_WORLD);
@@ -343,6 +325,10 @@ void sample(int id, double probability, int rank, int numNode) {
     MPI_Bcast(Y.B[i], Y.rowLengths[i], MPI_INT, 0, MPI_COMM_WORLD);
     MPI_Bcast(Y.C[i], Y.rowLengths[i], MPI_INT, 0, MPI_COMM_WORLD);
   }
+  double firstSendTimeEnd = MPI_Wtime();
+
+  double sendTimeBeforeCal = firstSendTimeEnd - firstSendTimeStart;
+  printf("======>before cal sending time: %10.6f\n", sendTimeBeforeCal);
     
   //openmpi matrix multiplication
   printf("start_omp_matrix_multiplication\n");
@@ -354,6 +340,8 @@ void sample(int id, double probability, int rank, int numNode) {
   if (rank == 0) {
     initCompressedMatrix(&finalResult, ROW_NUM);
   }
+
+  double secondSendTimeStart = MPI_Wtime();
 
   //send result length to master
   printf("send result length to master\n");
@@ -383,6 +371,12 @@ void sample(int id, double probability, int rank, int numNode) {
       finalResult.C[j] = result.C[j];
     }
   }
+
+  double secondSendTimeEnd = MPI_Wtime();
+  double sendTimePostCal = secondSendTimeEnd - secondSendTimeStart;
+  printf("======>post cal sending time: %10.6f\n", sendTimePostCal);
+
+
 
   //write  to file (do we need to support parallel writing? TODO)
   if (g_writeToFile != 0) {
