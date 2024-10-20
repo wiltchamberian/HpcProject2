@@ -4,7 +4,7 @@
 #SBATCH --account=courses0101
 #SBATCH --mem=200G
 #SBATCH --time=00:10:00
+#SBATCH --cpus-per-task=128
 
-export OMP_SCHEDULE="static,200"
 cc -fopenmp project2.c -o project2
 srun ./project2 0 128 100000 0.05

@@ -68,9 +68,8 @@ int** alloc_matrix(int row, int column){
     if (matrix == NULL) {
       return NULL;
     }
-    int i = 0;
-#pragma omp parallel for private(i)
-    for(i = 0 ; i < row; ++i){
+#pragma omp parallel for
+    for(int i = 0 ; i < row; ++i){
         matrix[i] = calloc(column, sizeof(int));
     }
     return matrix;
@@ -78,9 +77,8 @@ int** alloc_matrix(int row, int column){
 
 void free_matrix(int** matrix, int row){
     omp_set_num_threads(GENERATE_THREAD_NUM);
-    int i = 0;
-#pragma omp parallel for private(i)
-    for(i = 0 ;i < row;++i){
+#pragma omp parallel for
+    for(int i = 0 ;i < row;++i){
       free(matrix[i]);
     }
     free(matrix);
@@ -88,9 +86,8 @@ void free_matrix(int** matrix, int row){
 
 void zero_matrix(int** matrix, int row, int column){
     omp_set_num_threads(GENERATE_THREAD_NUM);
-    int i = 0;
-#pragma omp parallel for private(i)
-    for(i = 0; i<row; ++i){
+#pragma omp parallel for
+    for(int i = 0; i<row; ++i){
         for(int j =0; j< column; ++j){
             matrix[i][j] = 0;
         }
@@ -118,9 +115,8 @@ int** matrix_multiply(int **A, int **B, int size) {
 #pragma omp parallel
     {
         printf("thread_id:%d\n", omp_get_thread_num());
-        int i = 0;
-#pragma omp for private(i)
-        for (i = 0; i < size; ++i) {
+#pragma omp for
+        for (int i = 0; i < size; ++i) {
             for (int j = 0; j < size; ++j) {
                 C[i][j] = 0;
                 for (int k = 0; k < size; ++k) {
@@ -139,9 +135,8 @@ void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
   {
     //printf("thread_id:%d\n", omp_get_thread_num());
     int seed = g_seed + sd * g_threadsPerProc + omp_get_thread_num();
-    int i = 0;
-#pragma omp for private(i)
-    for (i = 0; i < ROW_NUM; ++i) {
+#pragma omp for
+    for (int i = 0; i < ROW_NUM; ++i) {
       int nonZeroNum = 0;
       int* data = calloc(COLUMN_NUM, sizeof(int));
       int* index = calloc(COLUMN_NUM, sizeof(int));
@@ -159,6 +154,7 @@ void fill_compressed_matrix(CompressedMatrix* mat, double probability, int sd) {
       mat->C[i] = reAlloc(index, sizeof(int), nonZeroNum);
     }
   }
+  printf("maxNonZero:%d\n", mat->maxRowLength);
 
   return;
 }
@@ -177,9 +173,8 @@ CompressedMatrix omp_matrix_multiply(CompressedMatrix X, CompressedMatrix Y, int
         {
             printf("Number of threads in parallel region: %d\n", omp_get_num_threads());   
         }
-        int i = 0;
-#pragma omp for private(i) schedule(runtime) 
-        for (i = 0; i < numRows; ++i) {
+#pragma omp for schedule(runtime) 
+        for (int i = 0; i < numRows; ++i) {
             result.B[i] = calloc(COLUMN_NUM, sizeof(int));
             result.C[i] = calloc(COLUMN_NUM, sizeof(int));
             for (int k = 0; k < X.rowLengths[i]; ++k) {
